@@ -7,6 +7,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"sort"
 	"time"
 
 	"github.com/golang/geo/r3"
@@ -22,7 +23,7 @@ type Collector struct {
 	tickTime     time.Duration
 	mapNameFound bool
 	match        *models.Match
-	bspChecker   *BSPVisibilityChecker
+	losSystem    *LineOfSightSystem
 	parser       dem.Parser
 	logger       slog.Logger
 	perTickInfo  map[int]map[uint64]PlayerTickData
@@ -78,6 +79,41 @@ type PlayerTickData struct {
 	DamageDealtToPlayer    map[uint64]DamageDealt
 }
 
+type LineOfSightSystem struct {
+	mapModel    *Model
+	playerModel *Model
+	logger      *slog.Logger
+}
+
+func NewLineOfSightSystem(mapName, cs2MapsPath string, logger *slog.Logger) (*LineOfSightSystem, error) {
+	// HACK REMOVE
+	//mapPath := filepath.Join(cs2MapsPath, "maps", mapName+".obj")
+	mapPath := "C:\\Users\\richa\\code\\CS2ResourceAPI\\GameDataService\\ModelOutput\\world_output.obj"
+	mapModel, err := LoadOBJ(mapPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load map OBJ: %v", err)
+	}
+
+	return &LineOfSightSystem{
+		mapModel: mapModel,
+		logger:   logger,
+	}, nil
+}
+
+func (los *LineOfSightSystem) LoadPlayerModel() error {
+	//HACK REMOVE
+	playerModel, err := LoadOBJ("C:\\Users\\richa\\code\\CS2ResourceAPI\\GameDataService\\ModelOutput\\ctm_sas_output.obj")
+	if err != nil {
+		return fmt.Errorf("failed to load player model: %v", err)
+	}
+	los.playerModel = playerModel
+	return nil
+}
+
+func (los *LineOfSightSystem) CanSeeTarget(shooter, target PlayerTickData) bool {
+	return CanSeeTarget(shooter, target, los.playerModel, los.mapModel)
+}
+
 func (p *PlayerTickData) ForwardVector() r3.Vector {
 	// Convert degrees to radians
 	yaw := float64(p.ViewAngleX) * (math.Pi / 180)
@@ -91,6 +127,23 @@ func (p *PlayerTickData) ForwardVector() r3.Vector {
 	}
 
 	return forward.Normalize() // Ensure it's a unit vector
+}
+
+func (p *PlayerTickData) IsInFieldOfView(target r3.Vector) bool {
+	const FOV_DEGREES = 90.0 // CS2's typical FOV
+
+	toTarget := r3.Vector{
+		X: target.X - p.Position.X,
+		Y: target.Y - p.Position.Y,
+		Z: target.Z - p.Position.Z,
+	}.Normalize()
+
+	forward := p.ForwardVector()
+	dotProduct := forward.X*toTarget.X + forward.Y*toTarget.Y + forward.Z*toTarget.Z
+	angleRadians := math.Acos(dotProduct)
+	angleDegrees := angleRadians * (180 / math.Pi)
+
+	return angleDegrees <= FOV_DEGREES/2
 }
 
 func (p PlayerTickData) String() string {
@@ -154,16 +207,15 @@ func (c *Collector) Collect(demoPath string) (*models.Match, error) {
 
 	c.logger.Info("Map name detected: ", "MapName", c.match.MapName)
 
-	bspChecker, err := NewBSPVisibilityChecker(c.match.MapName, cs2MapsPath, c.logger)
+	losSystem, err := NewLineOfSightSystem(c.match.MapName, cs2MapsPath, &c.logger)
 	if err != nil {
-		log.Fatalf("Failed to load BSP data for map %s: %v\n", c.match.MapName, err)
+		log.Fatalf("Failed to load map data for map %s: %v\n", c.match.MapName, err)
 	} else {
-		c.bspChecker = bspChecker
-		if err := c.bspChecker.LoadPlayerModel(); err != nil {
+		c.losSystem = losSystem
+		if err := c.losSystem.LoadPlayerModel(); err != nil {
 			return nil, fmt.Errorf("failed to load player model: %v", err)
 		}
-
-		c.logger.Debug("Successfully loaded BSP and Player Model data", "MapName", c.match.MapName)
+		c.logger.Debug("Successfully loaded map and player model data", "MapName", c.match.MapName)
 	}
 
 	c.logger.Debug("Resuming full parsing...")
@@ -254,9 +306,7 @@ func (c *Collector) handleEntityUpdate(msg *msgs2.CSVCMsg_PacketEntities) {
 		c.logger.Debug("Tick time", "tickTime", c.tickTime)
 	}
 
-	// If we haven't yet found the map name and loaded the visibility files don't do work.
-	// TODO: We probably want to make sure this doesn't continue so perhaps we check currentTick, too.
-	if c.bspChecker == nil {
+	if c.losSystem == nil {
 		return
 	}
 
@@ -406,6 +456,10 @@ func (c *Collector) AnalyzeTimeToDamage() {
 	c.logger.Debug("Starting AnalyzeTimeToDamage")
 	c.logger.Debug("perTickInfo state", "numTicks", len(c.perTickInfo))
 
+	// Map to store reaction times per player
+	// HACK: Just putting this in to get a nice output for now
+	reactionTimes := make(map[string][]int64)
+
 	for tick, playerData := range c.perTickInfo {
 		for steamID, playerTick := range playerData {
 			if !playerTick.IsAlive || playerTick.DamageDealtToPlayer == nil {
@@ -438,6 +492,8 @@ func (c *Collector) AnalyzeTimeToDamage() {
 					}
 
 					if timeToDamage > 0 && timeToDamage < 1000 {
+						// HACK: This is temporary for ouptut testing
+						reactionTimes[playerTick.PlayerName] = append(reactionTimes[playerTick.PlayerName], timeToDamage)
 						if playerTick.PlayerName == "shmeeny" {
 							c.logger.Warn("Player time to damage",
 								"player", playerTick.PlayerName,
@@ -452,6 +508,31 @@ func (c *Collector) AnalyzeTimeToDamage() {
 			}
 		}
 	}
+
+	// Compute and log median TTD for each player
+	// HACK This is just for testing output for now
+	for player, times := range reactionTimes {
+		medianTTD := calculateMedian(times)
+		c.logger.Warn("Median Time-To-Damage",
+			"player", player,
+			"medianReactionTimeMs", medianTTD)
+	}
+}
+
+// Function to calculate median from a slice of int64
+// HACK: This needs to live somewhere else
+func calculateMedian(values []int64) int64 {
+	if len(values) == 0 {
+		return 0
+	}
+
+	sort.Slice(values, func(i, j int) bool { return values[i] < values[j] })
+	mid := len(values) / 2
+
+	if len(values)%2 == 0 {
+		return (values[mid-1] + values[mid]) / 2
+	}
+	return values[mid]
 }
 
 func (c *Collector) findLastContinuousVisibilityStart(playerID, targetID uint64, currentTick int) (int, bool) {
@@ -481,7 +562,7 @@ func (c *Collector) findLastContinuousVisibilityStart(playerID, targetID uint64,
 		}
 		// END EVIL TESTING HACK -- REMOVE ME
 
-		isVisible := c.bspChecker.IsVisible(playerTick, targetTick)
+		isVisible := c.losSystem.CanSeeTarget(playerTick, targetTick)
 
 		/*c.logger.Debug("findLastContinuousVisibilityStart -- Visibility check",
 			"tick", tick,

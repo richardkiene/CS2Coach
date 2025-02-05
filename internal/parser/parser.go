@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime/debug"
-	"sort"
 	"time"
 
 	"github.com/golang/geo/r3"
@@ -1516,21 +1515,6 @@ func (p *Parser) handlePlayerHurt(e events.PlayerHurt) {
 	}
 }*/
 
-func calculateMedian(values []float64) float64 {
-	if len(values) == 0 {
-		return 0
-	}
-	sorted := make([]float64, len(values))
-	copy(sorted, values)
-	sort.Float64s(sorted)
-
-	mid := len(sorted) / 2
-	if len(sorted)%2 == 0 {
-		return (sorted[mid-1] + sorted[mid]) / 2
-	}
-	return sorted[mid]
-}
-
 func (p *Parser) handleRoundEnd(e events.RoundEnd) {
 	for _, player := range p.parser.GameState().Participants().Playing() {
 		if player.SteamID64 == 0 {
@@ -1564,7 +1548,8 @@ func (p *Parser) handleRoundEnd(e events.RoundEnd) {
 			}
 		}
 
-		stats.MedianTTD = calculateMedian(stats.TimeToFirstDamage)
+		// HACK commented out to keep the complier happy
+		//stats.MedianTTD = calculateMedian(stats.TimeToFirstDamage)
 	}
 
 	if p.debug {

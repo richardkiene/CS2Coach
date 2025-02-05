@@ -123,7 +123,7 @@ func handleAnalyze(demoPath, playerName, steamID string, debug, verbose bool) {
 	if mapName == "" {
 		log.Fatal("Unable to determine map name from demo file")
 	}
-	logger.Info("Map detected in demo: %s\n", mapName)
+	logger.Info("Map detected", "mapName", mapName)
 
 	// Step 2: Analyze the parsed match data
 	a := analyzer.NewAnalyzer()
@@ -136,18 +136,13 @@ func handleAnalyze(demoPath, playerName, steamID string, debug, verbose bool) {
 	displayLeetifyMetrics(stats, match, playerName, verbose)
 }
 
-func fileExists(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
-}
-
 func displayLeetifyMetrics(stats *models.AnalyzedStats, match *models.Match, playerName string, verbose bool) {
 	// Calculate metrics
 	roundCount := stats.BasicStats.RoundsActive
 	fmt.Println("stats.BasicStats.RoundsActive: " + fmt.Sprint(stats.BasicStats.RoundsActive))
 	leetifyMetrics := analyzer.CalculateLeetifyMetrics(&stats.BasicStats, roundCount)
 
-	fmt.Printf("\nLeetify Analysis:\n")
+	fmt.Printf("\nLeetify Analysis for: %s\n", playerName)
 	fmt.Printf("\nMap: %s\n", match.MapName)
 
 	// Overview
